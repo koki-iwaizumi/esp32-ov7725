@@ -1,3 +1,4 @@
+#include <string.h>
 #include <esp_wifi.h>
 #include <esp_event_loop.h>
 #include <esp_log.h>
@@ -6,6 +7,9 @@
 #include <sys/param.h>
 #include <esp_http_server.h>
 #include <esp_camera.h>
+
+#include "mbedtls/base64.h"
+#include "cJSON.h"
 
 #include "sensor.h"
 #include "sccb.h"
@@ -58,41 +62,57 @@ static camera_config_t camera_config = {
 	.ledc_timer = LEDC_TIMER_0,
 	.ledc_channel = LEDC_CHANNEL_0,
 
-	.pixel_format = PIXFORMAT_RGB565,
+	.pixel_format = PIXFORMAT_YUV422,
 	.frame_size = FRAMESIZE_VGA,
 
 	.jpeg_quality = 12,
 	.fb_count = 1
 };
 
-esp_err_t hello_get_handler(httpd_req_t *req)
+esp_err_t index_get_handler(httpd_req_t *req)
 {
-	size_t query_buf_len = httpd_req_get_url_query_len(req) + 1;
-	if(query_buf_len > 1){
-		char key[8], value[8], read[8];
-		char* query_buf = malloc(query_buf_len);
-		if (httpd_req_get_url_query_str(req, query_buf, query_buf_len) == ESP_OK){
-			ESP_LOGI(TAG, "Found URL query => %s", query_buf);
+	extern const unsigned char index_start[] asm("_binary_index_html_start");
+	extern const unsigned char index_end[]   asm("_binary_index_html_end");
+	const size_t index_size = (index_end - index_start);
 
-			// write
-			if(httpd_query_key_value(query_buf, "key", key, sizeof(key)) == ESP_OK && httpd_query_key_value(query_buf, "value", value, sizeof(value)) == ESP_OK){
-				int key_int = atoi(key);
-				int value_int = atoi(value);
+	httpd_resp_send_chunk(req, (const char *)index_start, index_size);
+	httpd_resp_sendstr_chunk(req, NULL);
 
-				SCCB_Write(sensor->slv_addr, key_int, value_int);
-				ESP_LOGI(TAG, "write => key=%02X, value=%02X", key_int, value_int);
-			}
+	return ESP_OK;
+}
 
-			// read
-			if(httpd_query_key_value(query_buf, "read", read, sizeof(read)) == ESP_OK){
-				int read_int = atoi(read);
-				ESP_LOGI(TAG, "read => regist=%02X, value=%02X", read_int, SCCB_Read(sensor->slv_addr, read_int));
-			}
-		}
-		free(query_buf);
+esp_err_t image_post_handler(httpd_req_t *req)
+{
+	int content_buf_size = 10 * 1000;
+	char *content_buf = calloc(content_buf_size, sizeof(char));
+    if(content_buf == NULL){
+		ESP_LOGE(TAG, "Failed to allocate frame buffer - content_buf");
+		httpd_resp_send_500(req);
+		return ESP_FAIL;
+    }
+
+	if(httpd_req_recv(req, content_buf, req->content_len) <= 0){
+		ESP_LOGE(TAG, "httpd_req_recv failed");
+		httpd_resp_send_500(req);
+		return ESP_FAIL;
 	}
 
-	camera_fb_t * fb = NULL;
+	ESP_LOGE(TAG, "httpd_req_recv content=%s", content_buf);
+
+	cJSON *content_json = cJSON_Parse(content_buf);
+
+	for(int i = 0; i <= 172; i++){
+		char key[4];
+		itoa(i,key,10);
+		int value = strtol(cJSON_GetObjectItem(content_json, key)->valuestring, NULL, 16);
+
+		SCCB_Write(sensor->slv_addr, i, value);
+	}
+
+	cJSON_Delete(content_json);
+	free(content_buf);
+
+	camera_fb_t *fb = NULL;
 	esp_err_t res = ESP_OK;
 	int64_t fr_start = esp_timer_get_time();
 
@@ -103,7 +123,7 @@ esp_err_t hello_get_handler(httpd_req_t *req)
 		return ESP_FAIL;
 	}
 
-	uint8_t * buf = NULL;
+	uint8_t *buf = NULL;
 	size_t buf_len = 0;
 	bool converted = frame2bmp(fb, &buf, &buf_len);
 	esp_camera_fb_return(fb);
@@ -113,18 +133,100 @@ esp_err_t hello_get_handler(httpd_req_t *req)
 		return ESP_FAIL;
 	}
 
-	res = httpd_resp_set_type(req, "image/bmp") || httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.bmp") || httpd_resp_send(req, (const char *)buf, buf_len);
+	ESP_LOGI(TAG, "esp_get_free_heap_size (%d bytes)", esp_get_free_heap_size());
+	ESP_LOGI(TAG, "esp_get_minimum_free_heap_size (%d bytes)", esp_get_minimum_free_heap_size());
+	ESP_LOGI(TAG, "heap_caps_get_free_size(MALLOC_CAP_8BIT) (%d bytes)", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+	ESP_LOGI(TAG, "heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) (%d bytes)", heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+	ESP_LOGI(TAG, "heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) (%d bytes)", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+	int image_buf_size = 1300 * 1000;
+	uint8_t *image_buf = calloc(image_buf_size, sizeof(char));
+    if(image_buf == NULL){
+		free(buf);
+		ESP_LOGE(TAG, "Failed to allocate frame buffer - image_buf");
+		httpd_resp_send_500(req);
+		return ESP_FAIL;
+    }
+
+	size_t olen = 0;
+	int base64_err = mbedtls_base64_encode(image_buf, image_buf_size, &olen, buf, buf_len);
 	free(buf);
+	if (base64_err != 0) {
+		ESP_LOGE(TAG, "error base64 encoding, error %d, buff size: %d", base64_err, olen);
+		httpd_resp_send_500(req);
+		return ESP_FAIL;
+	}
+
+	ESP_LOGI(TAG, "esp_get_free_heap_size (%d bytes)", esp_get_free_heap_size());
+	ESP_LOGI(TAG, "esp_get_minimum_free_heap_size (%d bytes)", esp_get_minimum_free_heap_size());
+	ESP_LOGI(TAG, "heap_caps_get_free_size(MALLOC_CAP_8BIT) (%d bytes)", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+	ESP_LOGI(TAG, "heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) (%d bytes)", heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+	ESP_LOGI(TAG, "heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) (%d bytes)", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+	uint8_t *image_json = calloc(image_buf_size, sizeof(char));
+    if(image_json == NULL){
+		free(image_buf);
+		ESP_LOGE(TAG, "Failed to allocate frame buffer - image_json");
+		httpd_resp_send_500(req);
+		return ESP_FAIL;
+    }
+
+	sprintf((char *)image_json, "{\"image\":\"%s\"}", (const char *)image_buf);
+	free(image_buf);
+	ESP_LOGI(TAG, "image_json length=%d", strlen((const char*)image_json));
+
+	res = httpd_resp_set_type(req, "application/json") || httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*") || httpd_resp_send(req, (const char *)image_json, strlen((const char*)image_json));
+	free(image_json);
+
 	int64_t fr_end = esp_timer_get_time();
 	ESP_LOGI(TAG, "BMP: %uKB %ums", (uint32_t)(buf_len/1024), (uint32_t)((fr_end - fr_start)/1000));
 	return res;
 }
 
-httpd_uri_t hello = {
-	.uri = "/hello",
+esp_err_t config_get_handler(httpd_req_t *req)
+{
+	int data_json_size = 10 * 1000;
+	char *data_json = calloc(data_json_size, sizeof(char));
+    if(data_json == NULL){
+		ESP_LOGE(TAG, "Failed to allocate frame buffer - data_json");
+		httpd_resp_send_500(req);
+		return ESP_FAIL;
+    }
+
+	strcat(data_json, "{");
+	for(int i = 0; i <= 172; i++){
+		char data_json_buf[255] = {'\0'};
+		sprintf(data_json_buf, "\"%d\":\"%d\"", i, SCCB_Read(sensor->slv_addr, i));
+		strcat(data_json, data_json_buf);
+		if(i != 172) strcat(data_json, ",");
+	}
+	strcat(data_json, "}");
+
+	ESP_LOGI(TAG, "data_json=%s", data_json);
+	ESP_LOGI(TAG, "data_json length=%d", strlen((const char*)data_json));
+
+	esp_err_t res = httpd_resp_set_type(req, "application/json") || httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*") || httpd_resp_send(req, (const char *)data_json, strlen((const char*)data_json));
+	free(data_json);
+
+	return res;
+}
+
+httpd_uri_t index_uri = {
+	.uri = "/",
 	.method = HTTP_GET,
-	.handler = hello_get_handler,
-	.user_ctx = "Hello World!"
+	.handler = index_get_handler,
+};
+
+httpd_uri_t image_uri = {
+	.uri = "/image",
+	.method = HTTP_POST,
+	.handler = image_post_handler,
+};
+
+httpd_uri_t config_uri = {
+	.uri = "/config",
+	.method = HTTP_GET,
+	.handler = config_get_handler,
 };
 
 httpd_handle_t start_webserver(void)
@@ -135,7 +237,9 @@ httpd_handle_t start_webserver(void)
 	ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
 	if(httpd_start(&server, &config) == ESP_OK){
 		ESP_LOGI(TAG, "Registering URI handlers");
-		httpd_register_uri_handler(server, &hello);
+		httpd_register_uri_handler(server, &index_uri);
+		httpd_register_uri_handler(server, &image_uri);
+		httpd_register_uri_handler(server, &config_uri);
 		return server;
 	}
 

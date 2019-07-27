@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ja">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+		<link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.6.4/css/all.css">
+		<link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
+		<title>OV7725</title>
+		<style>
+			.alert{
+				display:none;
+			}
+			#overlay{   
+				position: fixed;
+				top: 0;
+				z-index: 100;
+				width: 100%;
+				height:100%;
+				display: none;
+				background: rgba(0,0,0,0.6);
+			}
+			.cv-spinner{
+				height: 100%;
+				display: flex;
+				justify-content: center;
+				align-items: center;  
+			}
+			.spinner{
+				width: 40px;
+				height: 40px;
+				border: 4px #ddd solid;
+				border-top: 4px #2e93e6 solid;
+				border-radius: 50%;
+				animation: sp-anime 0.8s infinite linear;
+			}
+			@keyframes sp-anime{
+				0% { 
+					transform: rotate(0deg); 
+				}
+				100% { 
+					transform: rotate(359deg); 
+				}
+			}
+			.is-hide{
+				display:none;
+			}
+			.ov_a{
+				height:600px;
+				overflow-y:auto;
+			}
+		</style>
+	</head>
+	<body>
+ 
+		<div id="overlay">
+			<div class="cv-spinner">
+				<span class="spinner"></span>
+			</div>
+		</div>
+
+		<div class="text-center mt-3 mb-3">
+			<h1>OV7725</h1>
+		</div>
+
+		<div class="container-fluid">
+			<div class="row">
+				<div class="col-lg-6 text-center mb-4">
+					<div class="row">
+						<div class="col-md-12">
+							<div class="alert alert-success" role="alert">success</div>
+							<div class="alert alert-danger" role="alert">failed</div>
+						</div>
+						<div class="col-md-12">
+							<img id="img" class="mw-100">
+						</div>
+						<div class="col-md-12 mt-4">
+							<button id="image_button" type="button" class="btn btn-success w-100">Take a Picture</button>
+						</div>
+					</div>
+				</div>
+
+				<div class="col-lg-6">
+					<div class="ov_a">
+						<form id="form">
+							<table id="table_regs" class="table table-striped">
+								<tr>
+									<th>Address(Hex)</th>
+									<th>Value(Hex)</th>
+								</tr>
+							</table>
+						</form>
+					</div>
+				</div>
+			</div>
+		</div>
+ 
+		<script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" crossorigin="anonymous"></script>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="sha384-UO2eT0CpHqdSJQ6hJty5KVphtPhzWj9WO1clHTMGa3JDZwrnQq4sF86dIHNDz0W1" crossorigin="anonymous"></script>
+		<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
+		<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.1/jquery.min.js"></script>
+
+		<script type="text/javascript">
+			$(function(){
+
+				var parseJson = function(data) {
+					var returnJson = {};
+					for(idx = 0; idx < data.length; idx++){
+					returnJson[data[idx].name] = data[idx].value
+					}
+					return returnJson;
+				};
+
+				$(document).ready(function(){
+					read_config();
+					get_image();
+				});
+
+				$("#image_button").on("click", get_image);
+
+				function get_image(){
+					$.ajax({
+						url: "./image",
+						type: "POST",
+						data: JSON.stringify(parseJson($("#form").serializeArray())),
+						dataType: "json",
+						beforeSend: function() {
+							$(".alert").css("display", "none");
+							$("#overlay").fadeIn(300);
+						}
+					})
+					.done((data) => {
+						$(".alert").css("display", "none");
+						$(".alert-success").css("display", "block");
+						$("#img").attr("src", "data:image/jpeg;base64," + data["image"]);
+					})
+					.fail((data) => {
+						$(".alert").css("display", "none");
+						$(".alert-danger").css("display", "block");
+						console.log(data);
+					})
+					.always((data) => {
+						setTimeout(function(){
+							$("#overlay").fadeOut(300);
+						},500);
+					});
+				}
+
+				function read_config(){
+					$.ajax({
+						url: "./config",
+						type: "GET",
+						dataType: "json",
+						async: false,
+					})
+					.done((data) => {
+						$.each(data, function(i, item){
+							$("#table_regs").append('<tr><td>0x' + Number(i).toString(16) + '</td><td><div class="input-group"><div class="input-group-prepend"><span class="input-group-text" id="text1a">0x</span></div><input name="' + i + '" value="' + Number(item).toString(16) + '" type="text" class="form-control"></div></td></tr>');
+						});
+					})
+				}
+			});
+		</script>
+	</body>
+</html>
